@@ -1002,15 +1002,31 @@ pplx::task<json::value> AppleAPI::SendServicesRequest(std::string uri,
 
 web::http::client::http_client AppleAPI::servicesClient()
 {
-    return this->_servicesClient;
+	// Same reasoning as gsaClient(): return a fresh connection per request rather
+	// than reusing one cached client across every developer-services call in a refresh.
+	http_client_config config;
+	config.set_validate_certificates(false);
+ 
+	return web::http::client::http_client(U("https://developerservices2.apple.com/services/v1"), config);
 }
-
+ 
 web::http::client::http_client AppleAPI::client()
 {
-    return this->_client;
+	http_client_config config;
+	config.set_validate_certificates(false);
+ 
+	return web::http::client::http_client(U("https://developerservices2.apple.com/services/QH65B2"), config);
 }
 
 web::http::client::http_client AppleAPI::gsaClient()
 {
-	return this->_gsaClient;
+	// Apple's edge serves at most two requests per connection and answers every
+	// request after that with a 503 HTML error page. Authenticating takes three
+	// requests (init, complete, apptokens), so the third fails whenever they
+	// share a pooled connection. Return a fresh client -- and therefore a fresh
+	// connection -- on every call instead of reusing the cached _gsaClient.
+	http_client_config config;
+	config.set_validate_certificates(false);
+
+	return web::http::client::http_client(U("https://gsa.apple.com"), config);
 }
