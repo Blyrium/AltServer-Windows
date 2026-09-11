@@ -18,6 +18,9 @@ extern "C" {
 }
 
 #include <ostream>
+#include <thread>
+#include <chrono>
+#include <algorithm>
 
 using namespace std;
 using namespace utility;                    // Common utilities like string conversions
@@ -986,7 +989,7 @@ pplx::task<std::shared_ptr<Account>> AppleAPI::FetchAccount(std::shared_ptr<Appl
 }
 
 pplx::task<plist_t> AppleAPI::SendAuthenticationRequest(std::map<std::string, plist_t> requestParameters,
-	std::shared_ptr<AnisetteData> anisetteData)
+	std::shared_ptr<AnisetteData> anisetteData, int attempt)
 {
 	auto header = plist_new_dict();
 	plist_dict_set_item(header, "Version", plist_new_string("1.0.1"));
@@ -1035,32 +1038,60 @@ pplx::task<plist_t> AppleAPI::SendAuthenticationRequest(std::map<std::string, pl
 		request.headers().add(pair.first, pair.second);
 	}
 
+	static const int maxAuthRetries = 5;
+
 	auto task = this->gsaClient().request(request)
 		.then([=](http_response response)
 			{
 				return response.content_ready();
 			})
-		.then([=](http_response response)
+		.then([=](http_response response) -> pplx::task<plist_t>
 			{
 				odslog("Received auth response status code: " << response.status_code());
-				return response.extract_vector();
-			})
-				.then([=](std::vector<unsigned char> compressedData)
+
+				// Apple's GSA edge pins a keep-alive connection to a backend node. Once that
+				// node starts failing, every request sent over the same connection returns
+				// 5xx. A fresh connection (see gsaClient()) avoids reusing a bad connection,
+				// but a new connection can still land on a bad node. Retry a handful of times
+				// with backoff, each attempt on its own fresh connection, before giving up.
+				if (response.status_code() >= 500 && response.status_code() < 600)
+				{
+					if (attempt < maxAuthRetries - 1)
 					{
-						std::vector<uint8_t> decompressedData = compressedData;
+						int delaySeconds = std::min(1 << attempt, 8);
 
-						std::string decompressedXML = std::string(decompressedData.begin(), decompressedData.end());
+						std::map<std::string, plist_t> requestParametersCopy = requestParameters;
+						std::shared_ptr<AnisetteData> anisetteDataCopy = anisetteData;
+						int nextAttempt = attempt + 1;
 
-						plist_t plist = nullptr;
-						plist_from_xml(decompressedXML.c_str(), (int)decompressedXML.size(), &plist);
+						return pplx::create_task([=]() -> pplx::task<plist_t>
+							{
+								std::this_thread::sleep_for(std::chrono::seconds(delaySeconds));
+								return this->SendAuthenticationRequest(requestParametersCopy, anisetteDataCopy, nextAttempt);
+							});
+					}
 
-						if (plist == nullptr)
+					throw APIError(APIErrorCode::InvalidResponse);
+				}
+
+				return response.extract_vector()
+					.then([=](std::vector<unsigned char> compressedData) -> plist_t
 						{
-							throw APIError(APIErrorCode::InvalidResponse);
-						}
+							std::vector<uint8_t> decompressedData = compressedData;
 
-						return plist;
-					})
+							std::string decompressedXML = std::string(decompressedData.begin(), decompressedData.end());
+
+							plist_t plist = nullptr;
+							plist_from_xml(decompressedXML.c_str(), (int)decompressedXML.size(), &plist);
+
+							if (plist == nullptr)
+							{
+								throw APIError(APIErrorCode::InvalidResponse);
+							}
+
+							return plist;
+						});
+			})
 		.then([=](plist_t plist)
           {
 				auto dictionary = plist_dict_get_item(plist, "Response");

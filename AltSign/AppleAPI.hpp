@@ -90,7 +90,7 @@ private:
 		std::shared_ptr<Team> team);
 
 	pplx::task<plist_t> SendAuthenticationRequest(std::map<std::string, plist_t> requestParameters,
-		std::shared_ptr<AnisetteData> anisetteData);
+		std::shared_ptr<AnisetteData> anisetteData, int attempt = 0);
 
 	pplx::task<web::json::value> SendServicesRequest(std::string uri,
 		std::string method,
